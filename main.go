@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-redis/redis/v8"
-	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 	"log"
 	"net/http"
 )
@@ -89,9 +89,66 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 	// Cache the task in redis
 	taskCacheKey := fmt.Sprintf("task:%d", task.ID)
 	taskCacheData, _ := json.Marshal(task)
-	rdb.set(ctx, taskCacheKey, taskCacheData, 0)
+	rdb.Set(ctx, taskCacheKey, taskCacheData, 0)
 
 	// Send the created task as a JSON response
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(task)
+}
+
+// Handler to get a task by ID
+func getTask(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("id")
+
+	// Check Redis for cached task
+	taskCacheKey := fmt.Sprintf("task:%s", taskID)
+	cachedTask, err := rdb.Get(ctx, taskCacheKey).Result()
+
+	if err == nil {
+		// If the task is in Redis, return it directly
+		w.Header().Set("Content-Type", "application/json")
+		/* It sends the content (in this case, the byte slice representation of cachedTask) as the body of the HTTP response.
+		The client (the user’s browser or any other system making the request) will receive this data.
+		The content type (e.g., JSON, HTML, plain text) is usually set by setting the appropriate response header, such as Content-Type: application/json. */
+		w.Write([]byte(cachedTask))
+		return
+	}
+
+	// If not in Redis, fetch the task from PostgreSQL
+	query := `SELECT id, name, completed FROM tasks WHERE id = $1`
+	var task Task
+	err = db.QueryRow(query, taskID).Scan(&task.ID, &task.NAME, &task.Completed)
+
+	if err != nil {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// Cache the task in Redis for future requests
+	/* 	json.Marshal(task): Converts a Go object (struct) into a JSON-encoded byte slice to store in Redis. */
+	taskCacheData, _ := json.Marshal(task)
+	rdb.Set(ctx, taskCacheKey, taskCacheData, 0)
+
+	// Send the task as a JSON response
+	w.Header().Set("Content-Type", "application/json")
+	/* 	json.NewEncoder(w).Encode(task): Converts a Go object (struct) into JSON and writes it directly to the HTTP response body. */
+	json.NewEncoder(w).Encode(task)
+}
+
+func main() {
+	// Initialize Redis and PostgreSQL
+	initRedis()
+	initDB()
+	createTable()
+
+	/* http.HandleFunc(): This binds the routes (/tasks and /task) to their respective handler functions (createTask and getTask).
+	http.ListenAndServe(":8080", nil): This starts the HTTP server on port 8080. If there’s any error, it will be logged. */
+
+	// Define API routes
+	http.HandleFunc("/tasks", createTask) // POST / tasks
+	http.HandleFunc("/task", getTask)     // GET / task?id=<taskID>
+
+	// Start the server
+	fmt.Println("Server running on port 8080...")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
